@@ -57,6 +57,7 @@ input { font: inherit; width: 100%; padding: 12px; border: 1.5px solid var(--lin
 .msg.ok { background: var(--accent-soft); color: var(--accent); font-weight: 700; }
 .mock { background: var(--warn-soft); color: var(--warn); text-align: center; font-size: 12px; padding: 4px; }
 .center { text-align: center; color: var(--sub); padding: 60px 0; }
+.diag { color: var(--sub); font-size: 11px; text-align: center; margin: 16px 0 0; }
 [hidden] { display: none !important; }
 </style>
 </head>
@@ -99,7 +100,20 @@ input { font: inherit; width: 100%; padding: 12px; border: 1.5px solid var(--lin
     return e;
   }
   function msg(kind, text) { return el('div', { class: 'msg ' + kind, text: text }); }
-  function show(nodes) { app.innerHTML = ''; nodes.forEach(function (n) { app.appendChild(n); }); }
+  // 困ったときに岡本さんへ伝えてもらう小さな表示（画面の版と、どこから開いたか）
+  var VERSION = 'v1.1';
+  function setDiag(s) {
+    diagText = '画面 ' + VERSION + '・' + s;
+    var d = document.getElementById('diag');
+    if (!d) { d = el('p', { id: 'diag', class: 'diag' }); app.appendChild(d); }
+    d.textContent = diagText;
+  }
+  var diagText = '';
+  function show(nodes) {
+    app.innerHTML = '';
+    nodes.forEach(function (n) { app.appendChild(n); });
+    if (diagText) app.appendChild(el('p', { id: 'diag', class: 'diag', text: diagText }));
+  }
   function readNames() { try { return JSON.parse(localStorage.getItem('keep_proxy_names_v1') || '[]'); } catch (e) { return []; } }
   function saveName(n) {
     try {
@@ -267,9 +281,29 @@ input { font: inherit; width: 100%; padding: 12px; border: 1.5px solid var(--lin
     }).catch(function (e) {
       sendBtn.disabled = false;
       sendBtn.textContent = 'グループに送る';
-      hint.textContent = '送れませんでした。もう一度押すか、文字でグループに書いてください（' + ((e && e.message) || e) + '）';
+      hint.textContent = sendErrorText(e);
     });
   };
+
+  // 送れなかった理由（LINE の説明より）。403 はほぼ「トークへの送信の許可がない」か「開き方」
+  function sendErrorText(e) {
+    var code = String((e && e.code) || '');
+    var raw = (e && e.message) || String(e);
+    if (code === '403' || code === 'FORBIDDEN' || /permission|403/i.test(raw)) {
+      return '送れませんでした：LINE の許可（トークへの送信）がまだか、開き方が違います。'
+        + 'いったん閉じて、グループの「ボタン」かアナウンスのリンクから開き直してください。'
+        + '（最近使ったサービスから開くと送れません）だめなら文字でグループに書いてください。［' + code + '］';
+    }
+    return '送れませんでした。もう一度押すか、文字でグループに書いてください［' + (code || '-') + '：' + raw + '］';
+  }
+
+  // トークへの送信の許可。LIFF の設定に chat_message.write が無いと unavailable、許可がまだなら prompt
+  function checkPermission() {
+    if (!liff.permission || !liff.permission.query) return Promise.resolve('unknown');
+    return liff.permission.query('chat_message.write')
+      .then(function (r) { return (r && r.state) || 'unknown'; })
+      .catch(function () { return 'unknown'; });
+  }
 
   /* ---------- 起動 ---------- */
   function loadLiff() {
@@ -291,8 +325,16 @@ input { font: inherit; width: 100%; padding: 12px; border: 1.5px solid var(--lin
       isInClient: function () { return ctx !== 'external'; },
       getContext: function () { return { type: ctx }; },
       sendMessages: function (m) {
+        if (/[?&]fail=403/.test(location.search)) {
+          var f = new Error('user doesn\'t grant required permissions yet'); f.code = '403'; return Promise.reject(f);
+        }
         if (/[?&]fail=1/.test(location.search)) return Promise.reject(new Error('見本：送信に失敗'));
         window.__sent.push(m); return Promise.resolve();
+      },
+      permission: {
+        query: function () {
+          return Promise.resolve({ state: (/[?&]perm=(\w+)/.exec(location.search) || [])[1] || 'granted' });
+        },
       },
       closeWindow: function () { window.__closed = true; },
     };
@@ -316,10 +358,22 @@ input { font: inherit; width: 100%; padding: 12px; border: 1.5px solid var(--lin
       }
       canSend = ctx.type === 'group' || ctx.type === 'room' || ctx.type === 'utou';
       render();
+      setDiag('トーク：' + (ctx.type || '-'));
       if (!canSend) {
         hint.textContent = 'グループのトークのリンクから開いてください（ここからはどのトークに送るか分かりません）';
         sendBtn.disabled = true;
+        return;
       }
+      return checkPermission().then(function (perm) {
+        setDiag('トーク：' + ctx.type + '・許可：' + perm);
+        if (perm === 'unavailable') {
+          canSend = false;
+          sendBtn.disabled = true;
+          hint.textContent = 'この画面の設定に「トークへの送信」が入っていません（LIFF の Scope に chat_message.write）。岡本さんに伝えてください';
+        } else if (perm === 'prompt') {
+          hint.textContent = 'LINE の許可（トークへの送信）がまだです。送れないときは、閉じて開き直し、許可の画面で「許可する」を押してください';
+        }
+      });
     }).catch(function (e) {
       show([msg('err', '開けませんでした：' + ((e && e.message) || e))]);
     });
